@@ -1,0 +1,498 @@
+---
+import '../styles/global.css';
+---
+
+<!doctype html>
+<html lang="id">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+        <link rel="icon" href="/favicon.ico" />
+        <meta name="generator" content={Astro.generator} />
+        <title>Kas BPI — Pencatat Uang Kas</title>
+        <script type="module">
+            import { KasStore } from '../lib/persistence.ts';
+            import {
+                balance,
+                cashInForPeriod,
+                currentPeriod,
+                formatRupiah,
+                membersForPeriod,
+                periodList,
+                recentCashOut,
+                type Status,
+            } from '../lib/kas.ts';
+
+            const storage = {
+                getItem: (key: string) => localStorage.getItem(key),
+                setItem: (key: string, value: string) => localStorage.setItem(key, value),
+                removeItem: (key: string) => localStorage.removeItem(key),
+            };
+
+            const store = new KasStore(storage);
+            let selectedPeriod = currentPeriod();
+            let modal: { kind: string; id?: string } | null = null;
+
+            const root = document.getElementById('root')!;
+            const BULAN = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+
+            function money(amount: number): string {
+                return formatRupiah(amount);
+            }
+
+            function fmtMonth(period: string): string {
+                const [y, m] = period.split('-');
+                return `${BULAN[parseInt(m, 10) - 1]} ${y}`;
+            }
+
+            function fmtDateTime(ts: number): string {
+                return new Date(ts).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+            }
+
+            function statusBadge(s: Status): string {
+                const cls = { 'belum bayar': 'bg-red-100 text-red-700', sebagian: 'bg-yellow-100 text-yellow-700', 'sudah bayar': 'bg-green-100 text-green-700' }[s];
+                const label = { 'belum bayar': 'Belum Bayar', sebagian: 'Sebagian', 'sudah bayar': 'Sudah Bayar' }[s];
+                return `<span class="inline-block px-2 py-0.5 rounded text-xs font-medium ${cls}">${label}</span>`;
+            }
+
+            function escapeHtml(text: string): string {
+                return text.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+            }
+
+            function openModal(kind: string, id?: string): void {
+                modal = { kind, id };
+                render();
+            }
+
+            function closeModal(): void {
+                modal = null;
+                render();
+            }
+
+            function alertErr(error: unknown): void {
+                alert(error instanceof Error ? error.message : String(error));
+            }
+
+            function downloadBlob(text: string, type: string, filename: string): void {
+                const blob = new Blob([text], { type });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            }
+
+            function render(): void {
+                const state = store.getState();
+                const isCurrent = selectedPeriod === currentPeriod();
+                const list = membersForPeriod(state, selectedPeriod);
+
+                root.innerHTML = `
+                <div class="max-w-md mx-auto px-3 py-4">
+                    <header class="mb-4">
+                        <div class="flex items-center justify-between gap-2">
+                            <div>
+                                <h1 class="text-xl font-bold text-gray-900">Kas BPI</h1>
+                                <p class="text-xs text-gray-500">Pencatat Uang Kas</p>
+                            </div>
+                            <div class="text-right">
+                                <div class="text-xs text-gray-500">Saldo Kas</div>
+                                <div class="text-2xl font-bold text-gray-900">${money(balance(state))}</div>
+                            </div>
+                        </div>
+                        <div class="mt-3 grid grid-cols-2 gap-2">
+                            <button data-action="add-cash-in" class="w-full bg-green-600 text-white py-3 rounded-lg font-semibold shadow-sm flex items-center justify-center gap-1">↘ Kas Masuk</button>
+                            <button data-action="add-cash-out" class="w-full bg-red-600 text-white py-3 rounded-lg font-semibold shadow-sm flex items-center justify-center gap-1">↙ Kas Keluar</button>
+                        </div>
+                        <div class="mt-3">
+                            <label class="block text-xs text-gray-500 mb-1">Periode</label>
+                            <select data-action="period" class="w-full border border-gray-300 rounded-lg px-3 py-2 bg-white text-sm focus:ring-2 focus:ring-green-500 focus:border-transparent outline-none">
+                                ${periodList(state).map((p) => `<option value="${p}" ${p === selectedPeriod ? 'selected' : ''}>${fmtMonth(p)}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="mt-3 grid grid-cols-2 gap-2">
+                            <button data-action="export-json" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-700 bg-white hover:bg-gray-50">Ekspor JSON</button>
+                            <button data-action="export-csv" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-700 bg-white hover:bg-gray-50">Ekspor CSV</button>
+                            <button data-action="import-json" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-700 bg-white hover:bg-gray-50">Impor JSON</button>
+                        </div>
+                    </header>
+
+                    <main>
+                        <section class="mb-4">
+                            <h2 class="text-sm font-bold text-gray-800 mb-2 flex items-center justify-between">
+                                ${fmtMonth(selectedPeriod)} ${isCurrent ? '<span class="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded">bulan ini</span>' : ''}
+                            </h2>
+                            ${state.members.length === 0
+                                ? `<div class="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                                    <p class="text-sm text-amber-800">Belum ada anggota. Tambah anggota untuk mulai mencatat iuran.</p>
+                                    <button data-action="add-member" class="mt-2 w-full text-sm text-green-600 underline">Tambah anggota</button>
+                                  </div>`
+                                : list.length === 0
+                                ? `<p class="text-sm text-gray-500">Tidak ada anggota dengan aktivitas pada periode ini.</p>`
+                                : `<div class="space-y-2">${list.map(({ id, progress }) => memberCard(state, id, progress, isCurrent)).join('')}</div>`}
+                        </section>
+
+                        <section>
+                            <h2 class="text-sm font-bold text-gray-800 mb-2">Transaksi ${fmtMonth(selectedPeriod)}</h2>
+                            <div class="space-y-1">${transactionsHtml(state)}</div>
+                        </section>
+
+                        <p class="mt-4 text-xs text-gray-400 text-center">Data disimpan di browser ini. Gunakan Ekspor untuk cadangan.</p>
+                    </main>
+
+                    ${modalHtml(state)}
+                </div>
+                `;
+            }
+
+            function memberCard(state: any, id: string, progress: any, isCurrent: boolean): string {
+                const member = state.members.find((m: any) => m.id === id)!;
+                const actions = [
+                    `<button data-action="member-transactions" data-id="${id}" class="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-xs text-gray-700 hover:bg-gray-50">Transaksi</button>`,
+                ];
+                if (isCurrent) {
+                    actions.push(
+                        `<button data-action="edit-member" data-id="${id}" class="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-xs text-gray-700 hover:bg-gray-50">Ubah</button>`,
+                        `<button data-action="toggle-archive" data-id="${id}" class="flex-1 border border-gray-300 rounded-lg px-2 py-1.5 text-xs text-gray-700 hover:bg-gray-50">${member.active ? 'Arsipkan' : 'Aktifkan'}</button>`,
+                        `<button data-action="delete-member" data-id="${id}" class="flex-1 border border-red-200 rounded-lg px-2 py-1.5 text-xs text-red-700 hover:bg-red-50">Hapus</button>`
+                    );
+                }
+                return `
+                <div class="border border-gray-200 rounded-lg p-3 bg-white">
+                    <div class="flex justify-between items-start mb-1">
+                        <div>
+                            <div class="font-semibold text-gray-900">${escapeHtml(progress.name)}</div>
+                            <div class="text-xs text-gray-500">${member.active ? 'Aktif' : 'Arsip'}</div>
+                        </div>
+                        ${statusBadge(progress.status)}
+                    </div>
+                    <div class="mt-2">
+                        <div class="w-full bg-gray-200 h-2 rounded overflow-hidden">
+                            <div class="bg-green-600 h-full rounded" style="width:${progress.pct}%"></div>
+                        </div>
+                        <div class="text-sm mt-1">${money(progress.sum)} / ${money(progress.target)}</div>
+                        ${progress.kelebihan > 0
+                            ? `<div class="text-xs text-red-600 mt-0.5">kelebihan ${money(progress.kelebihan)}</div>`
+                            : `<div class="text-xs text-gray-500 mt-0.5">sisa ${money(progress.remaining)}</div>`}
+                    </div>
+                    <div class="mt-2 grid grid-cols-${actions.length} gap-1.5">${actions.join('')}</div>
+                </div>`;
+            }
+
+            function transactionsHtml(state: any): string {
+                const rows: Array<{ type: string; label: string; amount: number; createdAt: number; id: string; kind: 'in' | 'out' }> = [];
+                for (const c of cashInForPeriod(state, selectedPeriod)) {
+                    const member = state.members.find((m: any) => m.id === c.memberId);
+                    rows.push({ type: 'Masuk', label: `Iuran ${escapeHtml(member?.name ?? '-')}`, amount: c.amount, createdAt: c.createdAt, id: c.id, kind: 'in' });
+                }
+                for (const c of recentCashOut(state)) {
+                    rows.push({ type: 'Keluar', label: escapeHtml(c.note), amount: c.amount, createdAt: c.createdAt, id: c.id, kind: 'out' });
+                }
+                rows.sort((a, b) => b.createdAt - a.createdAt);
+                if (rows.length === 0) return `<p class="text-sm text-gray-500">Belum ada transaksi pada periode ini.</p>`;
+                return rows.map((r) => `
+                <div class="flex justify-between items-center border-b border-gray-100 py-2 last:border-0">
+                    <div>
+                        <div class="text-sm text-gray-800">${r.type} — ${r.label}</div>
+                        <div class="text-xs text-gray-500">${fmtDateTime(r.createdAt)}</div>
+                    </div>
+                    <div class="text-right">
+                        <div class="text-sm font-semibold ${r.kind === 'in' ? 'text-green-700' : 'text-red-700'}">${r.kind === 'in' ? '+' : '−'}${money(r.amount)}</div>
+                        <div class="flex gap-1 mt-1">
+                            <button data-action="${r.kind === 'in' ? 'edit-cashin' : 'edit-cashout'}" data-id="${r.id}" class="text-xs text-gray-500 hover:text-gray-900">Ubah</button>
+                            <button data-action="${r.kind === 'in' ? 'delete-cashin' : 'delete-cashout'}" data-id="${r.id}" class="text-xs text-red-500 hover:text-red-700">Hapus</button>
+                        </div>
+                    </div>
+                </div>`).join('');
+            }
+
+            function modalHtml(state: any): string {
+                if (!modal) return '';
+                const kind = modal.kind;
+                const backdrop = `<div class="fixed inset-0 z-50 bg-black/40" data-action="close-modal"></div>`;
+                const panel = `<div class="absolute inset-x-0 bottom-0 z-50 mx-auto max-w-md mt-2 rounded-t-2xl bg-white p-4 shadow-lg max-h-[85vh] overflow-y-auto">`;
+
+                if (kind === 'add-member' || kind === 'edit-member') {
+                    const member = kind === 'edit-member' && modal.id ? state.members.find((m: any) => m.id === modal.id) : null;
+                    return `${backdrop}${panel}
+                        <h3 class="text-base font-bold mb-3">${kind === 'edit-member' ? 'Ubah Anggota' : 'Tambah Anggota'}</h3>
+                        <form id="member-form" class="space-y-3">
+                            <input type="hidden" name="id" value="${member?.id ?? ''}" />
+                            <div>
+                                <label class="block text-xs text-gray-600 mb-1">Nama</label>
+                                <input name="name" value="${member?.name ?? ''}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-500 outline-none" autofocus required />
+                            </div>
+                            <div class="grid grid-cols-2 gap-2">
+                                <button type="submit" class="w-full bg-green-600 text-white py-2.5 rounded-lg font-semibold">Simpan</button>
+                                <button type="button" data-action="close-modal" class="w-full border border-gray-300 rounded-lg py-2.5 text-gray-700">Batal</button>
+                            </div>
+                        </form>
+                        ${member ? `<div class="mt-3"><button data-action="delete-member" data-id="${member.id}" class="w-full text-sm text-red-600 underline">Hapus anggota</button></div>` : ''}
+                    </div>`;
+                }
+
+                if (kind === 'add-cashin' || kind === 'edit-cashin') {
+                    const entry = kind === 'edit-cashin' && modal.id ? state.cashIn.find((c: any) => c.id === modal.id) : null;
+                    const memberOptions = state.members.map((m: any) => `<option value="${m.id}" ${entry?.memberId === m.id ? 'selected' : ''}>${escapeHtml(m.name)}${m.active ? '' : ' (arsip)'}</option>`).join('');
+                    const periodOptions = periodList(state).map((p) => `<option value="${p}" ${entry?.period === p ? 'selected' : p === selectedPeriod ? 'selected' : ''}>${fmtMonth(p)}</option>`).join('');
+                    return `${backdrop}${panel}
+                        <h3 class="text-base font-bold mb-3">${kind === 'edit-cashin' ? 'Ubah Pemasukan' : 'Tambah Pemasukan'}</h3>
+                        <form id="cashin-form" class="space-y-3">
+                            <input type="hidden" name="id" value="${entry?.id ?? ''}" />
+                            <div>
+                                <label class="block text-xs text-gray-600 mb-1">Anggota</label>
+                                <select name="memberId" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-500 outline-none">${memberOptions}</select>
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-600 mb-1">Periode</label>
+                                <select name="period" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-500 outline-none">${periodOptions}</select>
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-600 mb-1">Jumlah (Rp)</label>
+                                <input name="amount" type="number" min="0" step="1" value="${entry?.amount ?? ''}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-500 outline-none" required />
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-600 mb-1">Keterangan (opsional)</label>
+                                <input name="note" value="${entry?.note ?? ''}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-500 outline-none" />
+                            </div>
+                            <div class="grid grid-cols-2 gap-2">
+                                <button type="submit" class="w-full bg-green-600 text-white py-2.5 rounded-lg font-semibold">Simpan</button>
+                                <button type="button" data-action="close-modal" class="w-full border border-gray-300 rounded-lg py-2.5 text-gray-700">Batal</button>
+                            </div>
+                        </form>
+                    </div>`;
+                }
+
+                if (kind === 'add-cashout' || kind === 'edit-cashout') {
+                    const entry = kind === 'edit-cashout' && modal.id ? state.cashOut.find((c: any) => c.id === modal.id) : null;
+                    return `${backdrop}${panel}
+                        <h3 class="text-base font-bold mb-3">${kind === 'edit-cashout' ? 'Ubah Pengeluaran' : 'Tambah Pengeluaran'}</h3>
+                        <form id="cashout-form" class="space-y-3">
+                            <input type="hidden" name="id" value="${entry?.id ?? ''}" />
+                            <div>
+                                <label class="block text-xs text-gray-600 mb-1">Keterangan</label>
+                                <input name="note" value="${entry?.note ?? ''}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-500 outline-none" required autofocus />
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-600 mb-1">Jumlah (Rp)</label>
+                                <input name="amount" type="number" min="0" step="1" value="${entry?.amount ?? ''}" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-green-500 outline-none" required />
+                            </div>
+                            <div class="grid grid-cols-2 gap-2">
+                                <button type="submit" class="w-full bg-red-600 text-white py-2.5 rounded-lg font-semibold">Simpan</button>
+                                <button type="button" data-action="close-modal" class="w-full border border-gray-300 rounded-lg py-2.5 text-gray-700">Batal</button>
+                            </div>
+                        </form>
+                    </div>`;
+                }
+
+                if (kind === 'member-transactions' && modal.id) {
+                    const entries = cashInForPeriod(state, selectedPeriod).filter((c: any) => c.memberId === modal.id);
+                    return `${backdrop}${panel}
+                        <h3 class="text-base font-bold mb-3">Transaksi Anggota</h3>
+                        <div class="space-y-2 mb-4">
+                            ${entries.map((c: any) => `
+                                <div class="flex justify-between items-center border-b border-gray-100 pb-2 last:border-0">
+                                    <div class="text-sm">${fmtDateTime(c.createdAt)} — ${money(c.amount)}</div>
+                                    <div class="flex gap-1">
+                                        <button data-action="edit-cashin" data-id="${c.id}" class="text-xs text-gray-500 hover:text-gray-900">Ubah</button>
+                                        <button data-action="delete-cashin" data-id="${c.id}" class="text-xs text-red-500 hover:text-red-700">Hapus</button>
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+                        <div class="grid grid-cols-2 gap-2">
+                            <button data-action="add-cashin" class="w-full border border-gray-300 rounded-lg py-2.5 text-sm text-gray-700">Tambah Pembayaran</button>
+                            <button type="button" data-action="close-modal" class="w-full border border-gray-300 rounded-lg py-2.5 text-gray-700">Selesai</button>
+                        </div>
+                    </div>`;
+                }
+
+                if (kind === 'import') {
+                    return `${backdrop}${panel}
+                        <h3 class="text-base font-bold mb-3">Impor Data</h3>
+                        <p class="text-sm text-gray-600 mb-3">Impor akan mengganti seluruh data yang ada.</p>
+                        <form id="import-form" class="space-y-3">
+                            <input type="file" name="file" accept=".json" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm outline-none" required />
+                            <div class="grid grid-cols-2 gap-2">
+                                <button type="submit" class="w-full bg-green-600 text-white py-2.5 rounded-lg font-semibold">Impor</button>
+                                <button type="button" data-action="close-modal" class="w-full border border-gray-300 rounded-lg py-2.5 text-gray-700">Batal</button>
+                            </div>
+                        </form>
+                    </div>`;
+                }
+
+                return `${backdrop}${panel}</div>`;
+            }
+
+            function dispatchMemberForm(form: HTMLFormElement): void {
+                const name = (form.elements.namedItem('name') as HTMLInputElement).value.trim();
+                const id = (form.elements.namedItem('id') as HTMLInputElement).value;
+                try {
+                    if (id) store.dispatch({ type: 'EDIT_MEMBER', id, name });
+                    else store.dispatch({ type: 'ADD_MEMBER', name });
+                    closeModal();
+                } catch (error) {
+                    alertErr(error);
+                }
+            }
+
+            function dispatchCashInForm(form: HTMLFormElement): void {
+                const id = (form.elements.namedItem('id') as HTMLInputElement).value;
+                const memberId = (form.elements.namedItem('memberId') as HTMLSelectElement).value;
+                const period = (form.elements.namedItem('period') as HTMLSelectElement).value;
+                const amount = parseInt((form.elements.namedItem('amount') as HTMLInputElement).value, 10);
+                const note = (form.elements.namedItem('note') as HTMLInputElement).value.trim() || undefined;
+                try {
+                    if (id) store.dispatch({ type: 'EDIT_CASH_IN', id, memberId, period, amount });
+                    else store.dispatch({ type: 'ADD_CASH_IN', memberId, period, amount });
+                    closeModal();
+                } catch (error) {
+                    alertErr(error);
+                }
+            }
+
+            function dispatchCashOutForm(form: HTMLFormElement): void {
+                const id = (form.elements.namedItem('id') as HTMLInputElement).value;
+                const note = (form.elements.namedItem('note') as HTMLInputElement).value.trim();
+                const amount = parseInt((form.elements.namedItem('amount') as HTMLInputElement).value, 10);
+                try {
+                    if (id) store.dispatch({ type: 'EDIT_CASH_OUT', id, note, amount });
+                    else store.dispatch({ type: 'ADD_CASH_OUT', note, amount });
+                    closeModal();
+                } catch (error) {
+                    alertErr(error);
+                }
+            }
+
+            function handleAction(action: string, id: string | null): void {
+                const state = store.getState();
+                switch (action) {
+                    case 'period':
+                        break;
+                    case 'add-cash-in':
+                        openModal('add-cashin');
+                        break;
+                    case 'add-cash-out':
+                        openModal('add-cashout');
+                        break;
+                    case 'add-member':
+                        openModal('add-member');
+                        break;
+                    case 'edit-member':
+                        if (id) openModal('edit-member', id);
+                        break;
+                    case 'toggle-archive':
+                        if (id) {
+                            const member = state.members.find((m: any) => m.id === id);
+                            if (!member) return;
+                            if (!confirm(member.active ? `Arsipkan anggota "${escapeHtml(member.name)}"?` : `Aktifkan kembali anggota "${escapeHtml(member.name)}"?`)) return;
+                            store.dispatch({ type: 'ARCHIVE_MEMBER', id, restore: !member.active });
+                        }
+                        break;
+                    case 'delete-member':
+                        if (id) {
+                            const member = state.members.find((m: any) => m.id === id);
+                            if (!member) return;
+                            if (!confirm(`Hapus anggota "${escapeHtml(member.name)}" dan riwayat pembayarannya?`)) return;
+                            store.dispatch({ type: 'DELETE_MEMBER', id });
+                            if (modal?.kind === 'edit-member' && modal.id === id) closeModal();
+                        }
+                        break;
+                    case 'member-transactions':
+                        if (id) openModal('member-transactions', id);
+                        break;
+                    case 'edit-cashin':
+                    case 'edit-cashout':
+                        if (id) openModal(action, id);
+                        break;
+                    case 'delete-cashin':
+                    case 'delete-cashout':
+                        if (!id) return;
+                        const type = action === 'delete-cashin' ? 'pemasukan' : 'pengeluaran';
+                        if (!confirm(`Hapus ${type} ini?`)) return;
+                        store.dispatch({ type: action === 'delete-cashin' ? 'DELETE_CASH_IN' : 'DELETE_CASH_OUT', id });
+                        break;
+                    case 'export-json': {
+                        const json = store.exportJson();
+                        downloadBlob(json, 'application/json', `kas-${selectedPeriod}.json`);
+                        break;
+                    }
+                    case 'export-csv': {
+                        const csv = store.exportCsv();
+                        const name = `kas-${selectedPeriod}`;
+                        for (const [kind, text] of Object.entries(csv)) {
+                          downloadBlob(text, 'text/csv', `${name}-${kind}.csv`);
+                        }
+                        break;
+                    }
+                    case 'import-json':
+                        openModal('import');
+                        break;
+                    case 'close-modal':
+                        closeModal();
+                        break;
+                }
+            }
+
+            root.addEventListener('click', (event) => {
+                const btn = (event.target as Element).closest('[data-action]');
+                if (!btn) return;
+                const action = btn.getAttribute('data-action')!;
+                const id = btn.getAttribute('data-id') ?? undefined;
+                handleAction(action, id);
+            });
+
+            root.addEventListener('submit', (event) => {
+                const form = (event.target as Element).closest('form');
+                if (!(form instanceof HTMLFormElement)) return;
+                event.preventDefault();
+                switch (form.id) {
+                    case 'member-form':
+                        dispatchMemberForm(form);
+                        break;
+                    case 'cashin-form':
+                        dispatchCashInForm(form);
+                        break;
+                    case 'cashout-form':
+                        dispatchCashOutForm(form);
+                        break;
+                    case 'import-form': {
+                        const fileInput = form.elements.namedItem('file') as HTMLInputElement;
+                        const file = fileInput.files?.[0];
+                        if (!file) return;
+                        if (!confirm('Impor akan mengganti semua data yang ada. Lanjutkan?')) return;
+                        const reader = new FileReader();
+                        reader.onload = () => {
+                            try {
+                                store.importJson(reader.result as string);
+                                closeModal();
+                            } catch (error) {
+                                alertErr(error);
+                            }
+                        };
+                        reader.readAsText(file);
+                        break;
+                    }
+                }
+            });
+
+            root.addEventListener('change', (event) => {
+                const select = (event.target as Element).closest('select[data-action="period"]');
+                if (select instanceof HTMLSelectElement) {
+                    selectedPeriod = select.value;
+                    render();
+                }
+            });
+
+            store.subscribe(render);
+            render();
+        </script>
+    </head>
+    <body class="bg-gray-50 text-gray-900 antialiased">
+        <div id="root"></div>
+    </body>
+</html>
